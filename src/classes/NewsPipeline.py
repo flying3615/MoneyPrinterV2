@@ -15,7 +15,7 @@ from PIL import Image
 from pypdf import PdfReader
 from zhipuai import ZhipuAI
 
-from config import get_zhipu_api_key, get_zhipu_model, get_google_trends_geo
+from config import get_zhipu_api_key, get_zhipu_model, get_google_trends_geo, get_video_source, get_pexels_api_key
 from status import info, warning, success, error
 
 
@@ -212,6 +212,15 @@ def run_news_pipeline(pdf_path: str, youtube_instance, top_n: int = 2) -> None:
     # 3. Select
     selected = select_top_articles(articles, keywords, top_n=top_n)
 
+    video_source = get_video_source()
+    pexels_api_key = get_pexels_api_key()
+
+    if video_source == "pexels" and not pexels_api_key:
+        warning("[NewsPipeline] video_source is 'pexels' but pexels_api_key is not set — falling back to ai_images")
+        video_source = "ai_images"
+
+    info(f"[NewsPipeline] Video source: {video_source}")
+
     # 4. For each article: rewrite → inject into YouTube → generate → upload
     tts = TTS()
     for article in selected:
@@ -220,13 +229,35 @@ def run_news_pipeline(pdf_path: str, youtube_instance, top_n: int = 2) -> None:
         # Inject our content directly into the YouTube instance
         youtube_instance.subject = script_data["title"]
         youtube_instance.script = script_data["script"]
+        youtube_instance.video_clips = None  # reset from any previous run
 
-        # Generate metadata, images, TTS, combine
+        # Generate metadata and TTS (needed by both paths)
         youtube_instance.generate_metadata()
-        youtube_instance.generate_prompts()
-        for prompt in youtube_instance.image_prompts:
-            youtube_instance.generate_image(prompt)
         youtube_instance.generate_script_to_speech(tts)
+
+        if video_source == "pexels":
+            # Fetch Pexels video clips using the script's keywords
+            from pexels import fetch_clips_for_keywords
+            from moviepy.editor import AudioFileClip as _AC
+            tts_duration = _AC(youtube_instance.tts_path).duration
+            keywords = [k.strip() for k in script_data.get("keywords", "news").split(",")]
+            youtube_instance.video_clips = fetch_clips_for_keywords(
+                keywords=keywords,
+                api_key=pexels_api_key,
+                tts_duration=tts_duration,
+            )
+            if not youtube_instance.video_clips:
+                warning("[NewsPipeline] No Pexels clips downloaded, falling back to AI images")
+                youtube_instance.video_clips = None
+                youtube_instance.generate_prompts()
+                for prompt in youtube_instance.image_prompts:
+                    youtube_instance.generate_image(prompt)
+        else:
+            # AI image path
+            youtube_instance.generate_prompts()
+            for prompt in youtube_instance.image_prompts:
+                youtube_instance.generate_image(prompt)
+
         video_path = youtube_instance.combine()
 
         info(f"[NewsPipeline] Video ready: {video_path}")

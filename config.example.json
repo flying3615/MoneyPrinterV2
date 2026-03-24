@@ -35,5 +35,7 @@
   "llm_provider": "ollama",
   "zhipu_api_key": "",
   "zhipu_model": "glm-4-flash",
-  "google_trends_geo": "NZ"
+  "google_trends_geo": "NZ",
+  "video_source": "ai_images",
+  "pexels_api_key": ""
 }

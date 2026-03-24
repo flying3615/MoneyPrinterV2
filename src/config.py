@@ -325,6 +325,19 @@ def get_imagemagick_path() -> str:
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
         return json.load(file)["imagemagick_path"]
 
+def get_video_source() -> str:
+    """
+    Gets the video source. 'pexels' uses stock footage; 'ai_images' uses Gemini image generation.
+    Defaults to 'ai_images'.
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("video_source", "ai_images")
+
+def get_pexels_api_key() -> str:
+    """Gets the Pexels API key."""
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("pexels_api_key", "")
+
 def get_llm_provider() -> str:
     """
     Gets the LLM provider from config. Defaults to 'ollama'.

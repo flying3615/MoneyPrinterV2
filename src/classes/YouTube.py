@@ -552,6 +552,7 @@ class YouTube:
     def combine(self) -> str:
         """
         Combines everything into the final video.
+        Uses Pexels video clips when self.video_clips is set, otherwise AI images.
 
         Returns:
             path (str): The path to the generated MP4 File.
@@ -560,7 +561,6 @@ class YouTube:
         threads = get_threads()
         tts_clip = AudioFileClip(self.tts_path)
         max_duration = tts_clip.duration
-        req_dur = max_duration / len(self.images)
 
         # Make a generator that returns a TextClip when called with consecutive
         generator = lambda txt: TextClip(
@@ -574,46 +574,54 @@ class YouTube:
             method="caption",
         )
 
-        print(colored("[+] Combining images...", "blue"))
-
         clips = []
         tot_dur = 0
-        # Add downloaded clips over and over until the duration of the audio (max_duration) has been reached
-        while tot_dur < max_duration:
-            for image_path in self.images:
-                clip = ImageClip(image_path)
-                clip.duration = req_dur
-                clip = clip.set_fps(30)
+        use_videos = getattr(self, "video_clips", None)
 
-                # Not all images are same size,
-                # so we need to resize them
-                if round((clip.w / clip.h), 4) < 0.5625:
-                    if get_verbose():
-                        info(f" => Resizing Image: {image_path} to 1080x1920")
-                    clip = crop(
-                        clip,
-                        width=clip.w,
-                        height=round(clip.w / 0.5625),
-                        x_center=clip.w / 2,
-                        y_center=clip.h / 2,
-                    )
-                else:
-                    if get_verbose():
-                        info(f" => Resizing Image: {image_path} to 1920x1080")
-                    clip = crop(
-                        clip,
-                        width=round(0.5625 * clip.h),
-                        height=clip.h,
-                        x_center=clip.w / 2,
-                        y_center=clip.h / 2,
-                    )
-                clip = clip.resize((1080, 1920))
-
-                # FX (Fade In)
-                # clip = clip.fadein(2)
-
-                clips.append(clip)
-                tot_dur += clip.duration
+        if use_videos:
+            # ── Pexels video clips branch ──────────────────────────────────
+            print(colored("[+] Combining Pexels video clips...", "blue"))
+            clip_duration = 5  # seconds per clip
+            while tot_dur < max_duration:
+                for video_path in use_videos:
+                    try:
+                        vc = VideoFileClip(video_path).without_audio()
+                        # Trim to clip_duration
+                        vc = vc.subclip(0, min(clip_duration, vc.duration))
+                        # Resize / crop to 1080x1920 portrait
+                        target_w, target_h = 1080, 1920
+                        ratio = target_w / target_h
+                        if vc.w / vc.h > ratio:
+                            vc = crop(vc, width=round(ratio * vc.h), height=vc.h,
+                                      x_center=vc.w / 2, y_center=vc.h / 2)
+                        else:
+                            vc = crop(vc, width=vc.w, height=round(vc.w / ratio),
+                                      x_center=vc.w / 2, y_center=vc.h / 2)
+                        vc = vc.resize((target_w, target_h)).set_fps(30)
+                        clips.append(vc)
+                        tot_dur += vc.duration
+                        if tot_dur >= max_duration:
+                            break
+                    except Exception as e:
+                        warning(f" => Skipping clip {video_path}: {e}")
+        else:
+            # ── AI image branch (original behaviour) ───────────────────────
+            print(colored("[+] Combining images...", "blue"))
+            req_dur = max_duration / len(self.images)
+            while tot_dur < max_duration:
+                for image_path in self.images:
+                    clip = ImageClip(image_path)
+                    clip.duration = req_dur
+                    clip = clip.set_fps(30)
+                    if round((clip.w / clip.h), 4) < 0.5625:
+                        clip = crop(clip, width=clip.w, height=round(clip.w / 0.5625),
+                                    x_center=clip.w / 2, y_center=clip.h / 2)
+                    else:
+                        clip = crop(clip, width=round(0.5625 * clip.h), height=clip.h,
+                                    x_center=clip.w / 2, y_center=clip.h / 2)
+                    clip = clip.resize((1080, 1920))
+                    clips.append(clip)
+                    tot_dur += clip.duration
 
         final_clip = concatenate_videoclips(clips)
         final_clip = final_clip.set_fps(30)
