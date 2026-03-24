@@ -1,11 +1,11 @@
 import ollama
 
-from config import get_ollama_base_url
+from config import get_ollama_base_url, get_llm_provider, get_zhipu_api_key, get_zhipu_model
 
 _selected_model: str | None = None
 
 
-def _client() -> ollama.Client:
+def _ollama_client() -> ollama.Client:
     return ollama.Client(host=get_ollama_base_url())
 
 
@@ -16,7 +16,7 @@ def list_models() -> list[str]:
     Returns:
         models (list[str]): Sorted list of model names.
     """
-    response = _client().list()
+    response = _ollama_client().list()
     return sorted(m.model for m in response.models)
 
 
@@ -40,7 +40,7 @@ def get_active_model() -> str | None:
 
 def generate_text(prompt: str, model_name: str = None) -> str:
     """
-    Generates text using the local Ollama server.
+    Generates text using the configured LLM provider (GLM or Ollama).
 
     Args:
         prompt (str): User prompt
@@ -49,15 +49,29 @@ def generate_text(prompt: str, model_name: str = None) -> str:
     Returns:
         response (str): Generated text
     """
+    provider = get_llm_provider()
+
+    if provider == "glm":
+        from zhipuai import ZhipuAI
+        api_key = get_zhipu_api_key()
+        if not api_key:
+            raise RuntimeError("zhipu_api_key is not set in config.json")
+        model = model_name or get_zhipu_model() or "glm-4-flash"
+        client = ZhipuAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return response.choices[0].message.content.strip()
+
+    # Default: Ollama
     model = model_name or _selected_model
     if not model:
         raise RuntimeError(
             "No Ollama model selected. Call select_model() first or pass model_name."
         )
-
-    response = _client().chat(
+    response = _ollama_client().chat(
         model=model,
         messages=[{"role": "user", "content": prompt}],
     )
-
     return response["message"]["content"].strip()

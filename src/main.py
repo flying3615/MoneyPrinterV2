@@ -15,6 +15,7 @@ from classes.YouTube import YouTube
 from prettytable import PrettyTable
 from classes.Outreach import Outreach
 from classes.AFM import AffiliateMarketing
+from classes.NewsPipeline import run_news_pipeline
 from llm_provider import list_models, select_model, get_active_model
 
 def main():
@@ -418,6 +419,53 @@ def main():
 
         outreach.start()
     elif user_input == 5:
+        info("Starting News Video Pipeline...")
+
+        cached_accounts = get_accounts("youtube")
+
+        if len(cached_accounts) == 0:
+            error("No YouTube accounts found. Please set up an account via option 1 first.")
+            return
+
+        table = PrettyTable()
+        table.field_names = ["ID", "Nickname", "Niche"]
+        for account in cached_accounts:
+            table.add_row([
+                cached_accounts.index(account) + 1,
+                colored(account["nickname"], "blue"),
+                colored(account["niche"], "green"),
+            ])
+        print(table)
+
+        user_input = question("Select a YouTube account: ").strip()
+        selected_account = None
+        for account in cached_accounts:
+            if str(cached_accounts.index(account) + 1) == user_input:
+                selected_account = account
+
+        if selected_account is None:
+            error("Invalid account selected.")
+            return
+
+        pdf_path = question("Enter path to PDF file: ").strip().strip('"')
+        if not os.path.exists(pdf_path):
+            error(f"File not found: {pdf_path}")
+            return
+
+        top_n_input = question("How many articles to produce videos for? (default 2): ").strip()
+        top_n = int(top_n_input) if top_n_input.isdigit() else 2
+
+        youtube = YouTube(
+            selected_account["id"],
+            selected_account["nickname"],
+            selected_account["firefox_profile"],
+            selected_account["niche"],
+            selected_account["language"],
+        )
+
+        run_news_pipeline(pdf_path, youtube, top_n=top_n)
+
+    elif user_input == 6:
         if get_verbose():
             print(colored(" => Quitting...", "blue"))
         sys.exit(0)

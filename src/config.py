@@ -325,6 +325,29 @@ def get_imagemagick_path() -> str:
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
         return json.load(file)["imagemagick_path"]
 
+def get_llm_provider() -> str:
+    """
+    Gets the LLM provider from config. Defaults to 'ollama'.
+    Supported values: 'ollama', 'glm'
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("llm_provider", "ollama")
+
+def get_zhipu_api_key() -> str:
+    """Gets the Zhipu (GLM) API key."""
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("zhipu_api_key", "")
+
+def get_zhipu_model() -> str:
+    """Gets the Zhipu (GLM) model name. Defaults to glm-4-flash."""
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("zhipu_model", "glm-4-flash")
+
+def get_google_trends_geo() -> str:
+    """Gets the Google Trends geographic region. Defaults to 'NZ'."""
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("google_trends_geo", "NZ")
+
 def get_script_sentence_length() -> int:
     """
     Gets the forced script's sentence length.
