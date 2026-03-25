@@ -1,11 +1,12 @@
 import os
 import sys
 import json
+import shutil
 import srt_equalizer
 
 from termcolor import colored
 
-ROOT_DIR = os.path.dirname(sys.path[0])
+ROOT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 def assert_folder_structure() -> None:
     """
@@ -323,7 +324,17 @@ def get_imagemagick_path() -> str:
         path (str): The path to ImageMagick
     """
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
-        return json.load(file)["imagemagick_path"]
+        configured = json.load(file).get("imagemagick_path", "").strip()
+
+    placeholder = "Path to magick.exe or on linux/macOS just /usr/bin/convert"
+    if configured and configured != placeholder and os.path.exists(configured):
+        return configured
+
+    detected = shutil.which("magick") or shutil.which("convert")
+    if detected:
+        return detected
+
+    return configured or placeholder
 
 def get_video_source() -> str:
     """
@@ -333,6 +344,41 @@ def get_video_source() -> str:
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
         return json.load(file).get("video_source", "ai_images")
 
+def get_visual_style_pack() -> str:
+    """
+    Gets the preferred visual style pack. 'auto' rotates packs by content seed.
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return json.load(file).get("visual_style_pack", "auto")
+
+def get_originality_similarity_threshold() -> float:
+    """
+    Gets the maximum allowed similarity score before originality guard triggers.
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return float(json.load(file).get("originality_similarity_threshold", 0.78))
+
+def get_originality_lookback_videos() -> int:
+    """
+    Gets how many recent uploaded videos to compare against for duplicate checks.
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return int(json.load(file).get("originality_lookback_videos", 20))
+
+def get_enforce_originality_guard() -> bool:
+    """
+    Gets whether uploads should be blocked when a script stays too similar.
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return bool(json.load(file).get("enforce_originality_guard", True))
+
+def get_synthetic_disclosure_reminder() -> bool:
+    """
+    Gets whether the uploader should warn about altered or synthetic disclosure.
+    """
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        return bool(json.load(file).get("synthetic_disclosure_reminder", True))
+
 def get_pexels_api_key() -> str:
     """Gets the Pexels API key."""
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
@@ -341,20 +387,38 @@ def get_pexels_api_key() -> str:
 def get_llm_provider() -> str:
     """
     Gets the LLM provider from config. Defaults to 'ollama'.
-    Supported values: 'ollama', 'glm'
+    Supported values: 'ollama', 'openai_compatible'
     """
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
-        return json.load(file).get("llm_provider", "ollama")
+        provider = json.load(file).get("llm_provider", "ollama")
+        if provider in {"glm", "zhipu", "openai", "minimax"}:
+            return "openai_compatible"
+        return provider
+
+def get_openai_base_url() -> str:
+    """Gets the OpenAI-compatible API base URL."""
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        configured = json.load(file).get("openai_base_url", "")
+        return configured or os.environ.get(
+            "OPENAI_BASE_URL", "https://api.minimaxi.com/v1"
+        )
+
+def get_openai_api_key() -> str:
+    """Gets the OpenAI-compatible API key."""
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        configured = json.load(file).get("openai_api_key", "")
+        return configured or os.environ.get("OPENAI_API_KEY", "")
+
+def get_openai_model() -> str:
+    """Gets the OpenAI-compatible model name. Defaults to MiniMax-M2.7."""
+    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
+        configured = json.load(file).get("openai_model", "")
+        return configured or os.environ.get("OPENAI_MODEL", "MiniMax-M2.7")
 
 def get_zhipu_api_key() -> str:
-    """Gets the Zhipu (GLM) API key."""
+    """Gets the Zhipu API key used for optional OCR vision fallback."""
     with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
         return json.load(file).get("zhipu_api_key", "")
-
-def get_zhipu_model() -> str:
-    """Gets the Zhipu (GLM) model name. Defaults to glm-4-flash."""
-    with open(os.path.join(ROOT_DIR, "config.json"), "r") as file:
-        return json.load(file).get("zhipu_model", "glm-4-flash")
 
 def get_google_trends_geo() -> str:
     """Gets the Google Trends geographic region. Defaults to 'NZ'."""

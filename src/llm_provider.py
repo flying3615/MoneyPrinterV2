@@ -1,6 +1,13 @@
 import ollama
+from openai import OpenAI
 
-from config import get_ollama_base_url, get_llm_provider, get_zhipu_api_key, get_zhipu_model
+from config import (
+    get_ollama_base_url,
+    get_llm_provider,
+    get_openai_api_key,
+    get_openai_base_url,
+    get_openai_model,
+)
 
 _selected_model: str | None = None
 
@@ -9,15 +16,30 @@ def _ollama_client() -> ollama.Client:
     return ollama.Client(host=get_ollama_base_url())
 
 
+def _openai_client() -> OpenAI:
+    api_key = get_openai_api_key()
+    if not api_key:
+        raise RuntimeError(
+            "openai_api_key is not set in config.json and OPENAI_API_KEY is not set"
+        )
+    base_url = get_openai_base_url() or None
+    return OpenAI(api_key=api_key, base_url=base_url)
+
+
 def list_models() -> list[str]:
     """
-    Lists all models available on the local Ollama server.
+    Lists available models for the configured text provider.
 
     Returns:
         models (list[str]): Sorted list of model names.
     """
-    response = _ollama_client().list()
-    return sorted(m.model for m in response.models)
+    provider = get_llm_provider()
+    if provider == "ollama":
+        response = _ollama_client().list()
+        return sorted(m.model for m in response.models)
+
+    configured = get_openai_model().strip()
+    return [configured] if configured else []
 
 
 def select_model(model: str) -> None:
@@ -40,7 +62,7 @@ def get_active_model() -> str | None:
 
 def generate_text(prompt: str, model_name: str = None) -> str:
     """
-    Generates text using the configured LLM provider (GLM or Ollama).
+    Generates text using the configured LLM provider.
 
     Args:
         prompt (str): User prompt
@@ -51,18 +73,19 @@ def generate_text(prompt: str, model_name: str = None) -> str:
     """
     provider = get_llm_provider()
 
-    if provider == "glm":
-        from zhipuai import ZhipuAI
-        api_key = get_zhipu_api_key()
-        if not api_key:
-            raise RuntimeError("zhipu_api_key is not set in config.json")
-        model = model_name or get_zhipu_model() or "glm-4-flash"
-        client = ZhipuAI(api_key=api_key)
+    if provider != "ollama":
+        model = model_name or _selected_model or get_openai_model()
+        if not model:
+            raise RuntimeError(
+                "No OpenAI-compatible model configured. Set openai_model or OPENAI_MODEL."
+            )
+        client = _openai_client()
         response = client.chat.completions.create(
             model=model,
             messages=[{"role": "user", "content": prompt}],
+            extra_body={"reasoning_split": True},
         )
-        return response.choices[0].message.content.strip()
+        return (response.choices[0].message.content or "").strip()
 
     # Default: Ollama
     model = model_name or _selected_model

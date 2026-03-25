@@ -9,6 +9,10 @@ All your configurations will be in a file in the root directory, called `config.
 - `headless`: `boolean` - If `true`, the application will run in headless mode. This means that the browser will not be visible.
 - `ollama_base_url`: `string` - Base URL of your local Ollama server (default: `http://127.0.0.1:11434`).
 - `ollama_model`: `string` - Ollama model to use for text generation (e.g. `llama3.2:3b`). If empty, the app queries Ollama at startup and lets you pick from the available models interactively.
+- `llm_provider`: `string` - Text-generation provider. Options: `ollama`, `openai_compatible`.
+- `openai_base_url`: `string` - Base URL for an OpenAI-compatible provider such as MiniMax (default: `https://api.minimaxi.com/v1`). If empty, MPV2 falls back to environment variable `OPENAI_BASE_URL`, then to the MiniMax default URL.
+- `openai_api_key`: `string` - API key for the OpenAI-compatible provider. If empty, MPV2 falls back to environment variable `OPENAI_API_KEY`.
+- `openai_model`: `string` - Model name for the OpenAI-compatible provider (default: `MiniMax-M2.7`). If empty, MPV2 falls back to environment variable `OPENAI_MODEL`.
 - `twitter_language`: `string` - The language that will be used to generate & post tweets.
 - `nanobanana2_api_base_url`: `string` - Nano Banana 2 API base URL (default: `https://generativelanguage.googleapis.com/v1beta`).
 - `nanobanana2_api_key`: `string` - API key for Nano Banana 2 (Gemini image API). If empty, MPV2 falls back to environment variable `GEMINI_API_KEY`.
@@ -36,8 +40,9 @@ All your configurations will be in a file in the root directory, called `config.
 - `assembly_ai_api_key`: `string` - Your Assembly AI API key. Get yours from [here](https://www.assemblyai.com/app/).
 - `tts_voice`: `string` - Voice for KittenTTS text-to-speech. Default is `Jasper`. Options: `Bella`, `Jasper`, `Luna`, `Bruno`, `Rosie`, `Hugo`, `Kiki`, `Leo`.
 - `font`: `string` - The font that will be used to generate images. This should be a `.ttf` file in the `fonts/` directory.
-- `imagemagick_path`: `string` - The path to the ImageMagick binary. This is used by MoviePy to manipulate images. Install ImageMagick from [here](https://imagemagick.org/script/download.php) and set the path to the `magick.exe` on Windows, or on Linux/MacOS the path to `convert` (usually /usr/bin/convert).
+- `imagemagick_path`: `string` - The path to the ImageMagick binary. This is used by MoviePy to render subtitles. If left empty or set to the old placeholder value, MPV2 will try to auto-detect `magick` or `convert` from your system `PATH`.
 - `script_sentence_length`: `number` - The number of sentences in the generated video script (default: `4`).
+- `zhipu_api_key`: `string` - Optional Zhipu API key used only for the OCR vision fallback in `NewsPipeline` when local OCR is weak.
 
 ## Example
 
@@ -74,17 +79,28 @@ All your configurations will be in a file in the root directory, called `config.
   "assembly_ai_api_key": "",
   "tts_voice": "Jasper",
   "font": "bold_font.ttf",
-  "imagemagick_path": "Path to magick.exe or on linux/macOS just /usr/bin/convert",
-  "script_sentence_length": 4
+  "imagemagick_path": "",
+  "script_sentence_length": 4,
+  "llm_provider": "openai_compatible",
+  "openai_base_url": "https://api.minimaxi.com/v1",
+  "openai_api_key": "",
+  "openai_model": "MiniMax-M2.7",
+  "zhipu_api_key": ""
 }
 ```
 
 ## Environment Variable Fallbacks
 
 - `GEMINI_API_KEY`: used when `nanobanana2_api_key` is empty.
+- `OPENAI_BASE_URL`: used when `openai_base_url` is empty.
+- `OPENAI_API_KEY`: used when `openai_api_key` is empty.
+- `OPENAI_MODEL`: used when `openai_model` is empty.
 
 Example:
 
 ```bash
 export GEMINI_API_KEY="your_api_key_here"
+export OPENAI_BASE_URL="https://api.minimaxi.com/v1"
+export OPENAI_API_KEY="your_api_key_here"
+export OPENAI_MODEL="MiniMax-M2.7"
 ```

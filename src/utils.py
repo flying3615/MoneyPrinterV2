@@ -8,6 +8,7 @@ from status import *
 from config import *
 
 DEFAULT_SONG_ARCHIVE_URLS = []
+SUPPORTED_AUDIO_EXTENSIONS = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".wma")
 
 
 def close_running_selenium_instances() -> None:
@@ -34,7 +35,7 @@ def close_running_selenium_instances() -> None:
 
 def build_url(youtube_video_id: str) -> str:
     """
-    Builds the URL to the YouTube video.
+    Builds the URL to the YouTube Short.
 
     Args:
         youtube_video_id (str): The YouTube video ID.
@@ -42,7 +43,7 @@ def build_url(youtube_video_id: str) -> str:
     Returns:
         url (str): The URL to the YouTube video.
     """
-    return f"https://www.youtube.com/watch?v={youtube_video_id}"
+    return f"https://www.youtube.com/shorts/{youtube_video_id}"
 
 
 def rem_temp_files() -> None:
@@ -82,7 +83,7 @@ def fetch_songs() -> None:
                 name
                 for name in os.listdir(files_dir)
                 if os.path.isfile(os.path.join(files_dir, name))
-                and name.lower().endswith((".mp3", ".wav", ".m4a", ".aac", ".ogg"))
+                and name.lower().endswith(SUPPORTED_AUDIO_EXTENSIONS)
             ]
             if len(existing_audio_files) > 0:
                 return
@@ -102,7 +103,7 @@ def fetch_songs() -> None:
                 with open(archive_path, "wb") as file:
                     file.write(response.content)
 
-                SAFE_EXTENSIONS = (".mp3", ".wav", ".m4a", ".aac", ".ogg", ".flac")
+                SAFE_EXTENSIONS = SUPPORTED_AUDIO_EXTENSIONS + (".flac",)
                 with zipfile.ZipFile(archive_path, "r") as zf:
                     for member in zf.namelist():
                         basename = os.path.basename(member)
@@ -147,7 +148,7 @@ def choose_random_song() -> str:
             name
             for name in os.listdir(songs_dir)
             if os.path.isfile(os.path.join(songs_dir, name))
-            and name.lower().endswith((".mp3", ".wav", ".m4a", ".aac", ".ogg"))
+            and name.lower().endswith(SUPPORTED_AUDIO_EXTENSIONS)
         ]
         if len(songs) == 0:
             raise RuntimeError("No audio files found in Songs directory")

@@ -3,6 +3,10 @@ import base64
 import json
 import time
 import os
+import hashlib
+import shutil
+import traceback
+import textwrap
 import requests
 import assemblyai as aai
 
@@ -15,18 +19,28 @@ from status import *
 from uuid import uuid4
 from constants import *
 from typing import List
+from difflib import SequenceMatcher
 from moviepy.editor import *
+from PIL import Image as PILImage, ImageDraw, ImageFont
 from termcolor import colored
 from selenium_firefox import *
 from selenium import webdriver
 from moviepy.video.fx.all import crop
+from moviepy.video.fx import all as vfx
 from moviepy.config import change_settings
 from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.firefox.service import Service
 from selenium.webdriver.firefox.options import Options
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from moviepy.video.tools.subtitles import SubtitlesClip
 from webdriver_manager.firefox import GeckoDriverManager
 from datetime import datetime
+
+# Pillow 10 removed ANTIALIAS; older MoviePy still references it.
+if not hasattr(PILImage, "ANTIALIAS"):
+    PILImage.ANTIALIAS = PILImage.Resampling.LANCZOS
 
 # Set ImageMagick Path
 change_settings({"IMAGEMAGICK_BINARY": get_imagemagick_path()})
@@ -75,6 +89,7 @@ class YouTube:
         self._language: str = language
 
         self.images = []
+        self._runtime_profile_path = None
 
         # Initialize the Firefox profile
         self.options: Options = Options()
@@ -88,8 +103,12 @@ class YouTube:
                 f"Firefox profile path does not exist or is not a directory: {self._fp_profile_path}"
             )
 
+        self._runtime_profile_path = self._prepare_firefox_profile_copy(
+            self._fp_profile_path
+        )
         self.options.add_argument("-profile")
-        self.options.add_argument(self._fp_profile_path)
+        self.options.add_argument(self._runtime_profile_path)
+        self.options.binary_location = "/Applications/Firefox.app/Contents/MacOS/firefox"
 
         # Set the service
         self.service: Service = Service(GeckoDriverManager().install())
@@ -98,6 +117,21 @@ class YouTube:
         self.browser: webdriver.Firefox = webdriver.Firefox(
             service=self.service, options=self.options
         )
+
+    def _prepare_firefox_profile_copy(self, source_profile_path: str) -> str:
+        runtime_root = os.path.join(ROOT_DIR, ".mp", "firefox_profiles")
+        os.makedirs(runtime_root, exist_ok=True)
+        copied_profile = os.path.join(runtime_root, str(uuid4()))
+
+        ignore_names = shutil.ignore_patterns(
+            "parent.lock",
+            "lock",
+            ".parentlock",
+            "lockfile",
+            "singleton*",
+        )
+        shutil.copytree(source_profile_path, copied_profile, ignore=ignore_names)
+        return copied_profile
 
     @property
     def niche(self) -> str:
@@ -130,6 +164,159 @@ class YouTube:
             response (str): The generated AI Repsonse.
         """
         return generate_text(prompt, model_name=model_name)
+
+    def _style_pack_catalog(self) -> list[dict]:
+        return [
+            {
+                "name": "signal",
+                "subtitle_fontsize": 82,
+                "subtitle_color": "#FFFFFF",
+                "subtitle_stroke_color": "#111111",
+                "subtitle_stroke_width": 5,
+                "subtitle_box_width": 920,
+                "subtitle_box_height": 340,
+                "subtitle_bottom_margin": 140,
+                "bgm_volume": 0.16,
+                "transition_duration": 0.18,
+                "final_fade_duration": 0.18,
+                "image_prompt_style": "editorial photojournalism, crisp contrast, urgent newsroom lighting",
+            },
+            {
+                "name": "spotlight",
+                "subtitle_fontsize": 84,
+                "subtitle_color": "#FFFFFF",
+                "subtitle_stroke_color": "#000000",
+                "subtitle_stroke_width": 5,
+                "subtitle_box_width": 940,
+                "subtitle_box_height": 360,
+                "subtitle_bottom_margin": 130,
+                "bgm_volume": 0.18,
+                "transition_duration": 0.22,
+                "final_fade_duration": 0.2,
+                "image_prompt_style": "cinematic documentary realism, moody depth, bold foreground subjects",
+            },
+            {
+                "name": "flashpoint",
+                "subtitle_fontsize": 86,
+                "subtitle_color": "#FFFFFF",
+                "subtitle_stroke_color": "#1F2937",
+                "subtitle_stroke_width": 6,
+                "subtitle_box_width": 900,
+                "subtitle_box_height": 380,
+                "subtitle_bottom_margin": 120,
+                "bgm_volume": 0.2,
+                "transition_duration": 0.26,
+                "final_fade_duration": 0.2,
+                "image_prompt_style": "high-stakes magazine cover energy, dramatic composition, vivid highlights",
+            },
+        ]
+
+    def ensure_style_pack(self) -> dict:
+        if getattr(self, "style_pack", None):
+            return self.style_pack
+
+        catalog = self._style_pack_catalog()
+        configured = str(get_visual_style_pack() or "auto").strip().lower()
+        by_name = {pack["name"]: pack for pack in catalog}
+
+        if configured and configured != "auto" and configured in by_name:
+            chosen = by_name[configured]
+        else:
+            seed = f"{getattr(self, 'subject', '')}|{getattr(self, 'script', '')[:240]}|{getattr(self, '_language', '')}"
+            index = int(hashlib.sha256(seed.encode("utf-8")).hexdigest(), 16) % len(catalog)
+            chosen = catalog[index]
+
+        self.style_pack = dict(chosen)
+        self.style_pack_name = self.style_pack["name"]
+        return self.style_pack
+
+    def _normalize_script_for_similarity(self, text: str) -> str:
+        cleaned = re.sub(r"\s+", " ", (text or "").strip().lower())
+        cleaned = re.sub(r"[^a-z0-9 .,?!]", "", cleaned)
+        return cleaned
+
+    def get_script_originality_report(self, script: str | None = None) -> dict:
+        candidate = self._normalize_script_for_similarity(script or getattr(self, "script", ""))
+        recent_videos = list(reversed(self.get_videos()))[: get_originality_lookback_videos()]
+
+        report = {
+            "compared_videos": 0,
+            "max_similarity": 0.0,
+            "too_similar": False,
+            "matched_title": "",
+            "matched_url": "",
+        }
+        if not candidate:
+            return report
+
+        threshold = get_originality_similarity_threshold()
+        for video in recent_videos:
+            previous_script = self._normalize_script_for_similarity(video.get("script", ""))
+            if not previous_script:
+                continue
+            similarity = SequenceMatcher(None, candidate, previous_script).ratio()
+            report["compared_videos"] += 1
+            if similarity > report["max_similarity"]:
+                report["max_similarity"] = similarity
+                report["matched_title"] = video.get("title", "")
+                report["matched_url"] = video.get("url", "")
+
+        report["too_similar"] = report["max_similarity"] >= threshold
+        return report
+
+    def ensure_script_originality(self, regenerate_callback=None, max_attempts: int = 3) -> dict:
+        attempts = 0
+        while True:
+            report = self.get_script_originality_report()
+            report["attempts"] = attempts + 1
+            self.originality_report = report
+            self.originality_blocked = report["too_similar"]
+
+            if not report["too_similar"]:
+                if report["compared_videos"] > 0:
+                    success(
+                        f"Script originality check passed. Max similarity: {report['max_similarity']:.2f}"
+                    )
+                return report
+
+            if regenerate_callback is None or attempts >= max_attempts - 1:
+                warning(
+                    "Script originality guard still sees this script as too similar "
+                    f"({report['max_similarity']:.2f}) to '{report['matched_title']}'."
+                )
+                return report
+
+            warning(
+                "Script similarity is too high; regenerating a fresh variant "
+                f"(attempt {attempts + 2}/{max_attempts})."
+            )
+            regenerated = regenerate_callback()
+            if isinstance(regenerated, dict):
+                self.script = regenerated.get("script", self.script)
+                if regenerated.get("title"):
+                    self.subject = regenerated["title"]
+                if regenerated.get("keywords"):
+                    self.pending_keywords = [
+                        keyword.strip()
+                        for keyword in regenerated["keywords"].split(",")
+                        if keyword.strip()
+                    ]
+            elif isinstance(regenerated, str) and regenerated.strip():
+                self.script = regenerated.strip()
+            attempts += 1
+
+    def _update_synthetic_disclosure_flags(self, visual_source: str) -> None:
+        reasons = []
+        if visual_source == "ai_images":
+            reasons.append("AI-generated visuals")
+        if getattr(self, "synthetic_avatar_used", False):
+            reasons.append("synthetic avatar or digital presenter")
+        if getattr(self, "synthetic_voice_clone", False):
+            reasons.append("synthetic or cloned voice")
+
+        self.visual_source = visual_source
+        self.synthetic_disclosure_reasons = reasons
+        self.synthetic_disclosure_required = bool(reasons)
 
     def generate_topic(self) -> str:
         """
@@ -228,12 +415,17 @@ class YouTube:
         Returns:
             image_prompts (List[str]): Generated List of image prompts.
         """
-        n_prompts = len(self.script) / 3
+        sentence_count = len(
+            [part for part in re.split(r"[.!?]+", self.script) if part.strip()]
+        )
+        n_prompts = max(4, min(8, sentence_count * 2))
+        style_pack = self.ensure_style_pack()
 
         prompt = f"""
         Generate {n_prompts} Image Prompts for AI Image Generation,
         depending on the subject of a video.
         Subject: {self.subject}
+        Visual style direction: {style_pack["image_prompt_style"]}.
 
         The image prompts are to be returned as
         a JSON-Array of strings.
@@ -387,7 +579,179 @@ class YouTube:
         Returns:
             path (str): The path to the generated image.
         """
-        return self.generate_image_nanobanana2(prompt)
+        return self.generate_image_with_fallback(prompt, use_placeholder_fallback=True)
+
+    def generate_image_with_fallback(
+        self, prompt: str, use_placeholder_fallback: bool = True
+    ) -> str | None:
+        """
+        Generates an image and optionally falls back to a local placeholder.
+
+        Args:
+            prompt (str): Image prompt
+            use_placeholder_fallback (bool): Whether to fall back to local placeholder
+
+        Returns:
+            path (str | None): Generated image path, or None if remote generation failed
+        """
+        image_path = self.generate_image_nanobanana2(prompt)
+        if image_path:
+            return image_path
+        if not use_placeholder_fallback:
+            return None
+        warning("Falling back to a local placeholder image.")
+        return self.generate_image_placeholder(prompt)
+
+    def _derive_visual_keywords(self, keywords: list[str] | None = None) -> list[str]:
+        if keywords:
+            cleaned = [keyword.strip() for keyword in keywords if keyword.strip()]
+            if cleaned:
+                return cleaned[:6]
+
+        subject = getattr(self, "subject", "").strip()
+        if subject:
+            return [subject]
+        return ["news"]
+
+    def _try_prepare_pexels_clips(self, keywords: list[str]) -> bool:
+        api_key = get_pexels_api_key()
+        if not api_key:
+            return False
+
+        try:
+            from pexels import fetch_clips_for_keywords
+        except Exception as e:
+            warning(f"Failed to import Pexels helper, skipping video fallback: {e}")
+            return False
+
+        tts_duration = AudioFileClip(self.tts_path).duration
+        clips = fetch_clips_for_keywords(
+            keywords=keywords,
+            api_key=api_key,
+            tts_duration=tts_duration,
+        )
+        if not clips:
+            return False
+
+        self.video_clips = clips
+        self.images = []
+        success(f"Prepared {len(clips)} Pexels clips.")
+        return True
+
+    def prepare_visual_assets(self, keywords: list[str] | None = None) -> str:
+        """
+        Prepares visuals with layered fallback:
+        Gemini AI images -> Pexels clips -> local placeholders.
+
+        Args:
+            keywords (list[str] | None): Optional search keywords for Pexels
+
+        Returns:
+            source (str): The selected visual source
+        """
+        preferred_source = get_video_source()
+        visual_keywords = self._derive_visual_keywords(keywords)
+        pexels_available = bool(get_pexels_api_key())
+        self.ensure_style_pack()
+
+        self.video_clips = None
+        self.images = []
+
+        tried_pexels = False
+        if preferred_source == "pexels" and pexels_available:
+            tried_pexels = True
+            if self._try_prepare_pexels_clips(visual_keywords):
+                self._update_synthetic_disclosure_flags("pexels")
+                return "pexels"
+
+        if not getattr(self, "image_prompts", None):
+            self.generate_prompts()
+
+        ai_images = []
+        for prompt in self.image_prompts:
+            path = self.generate_image_with_fallback(
+                prompt, use_placeholder_fallback=False
+            )
+            if path:
+                ai_images.append(path)
+
+        if ai_images:
+            self.video_clips = None
+            self.images = ai_images
+            self._update_synthetic_disclosure_flags("ai_images")
+            success(f"Prepared {len(ai_images)} AI images.")
+            return "ai_images"
+
+        if not tried_pexels and pexels_available:
+            if self._try_prepare_pexels_clips(visual_keywords):
+                self._update_synthetic_disclosure_flags("pexels")
+                return "pexels"
+
+        for prompt in self.image_prompts:
+            self.generate_image_placeholder(prompt)
+        self.video_clips = None
+        self._update_synthetic_disclosure_flags("placeholder")
+        success(f"Prepared {len(self.images)} local placeholder images.")
+        return "placeholder"
+
+    def generate_image_placeholder(self, prompt: str) -> str:
+        """
+        Generates a simple local fallback image when the remote image API fails.
+
+        Args:
+            prompt (str): Image prompt context
+
+        Returns:
+            path (str): The path to the generated placeholder image.
+        """
+        width, height = 1080, 1920
+        image = PILImage.new("RGB", (width, height), "#0f172a")
+        draw = ImageDraw.Draw(image)
+
+        for y in range(height):
+            ratio = y / max(height - 1, 1)
+            color = (
+                int(15 + (30 * ratio)),
+                int(23 + (40 * ratio)),
+                int(42 + (70 * ratio)),
+            )
+            draw.line((0, y, width, y), fill=color)
+
+        try:
+            title_font = ImageFont.truetype(
+                os.path.join(get_fonts_dir(), get_font()), 72
+            )
+            body_font = ImageFont.truetype(
+                os.path.join(get_fonts_dir(), get_font()), 42
+            )
+        except Exception:
+            title_font = ImageFont.load_default()
+            body_font = ImageFont.load_default()
+
+        title = getattr(self, "subject", "News Update")
+        body = prompt[:220]
+
+        draw.rounded_rectangle(
+            (70, 180, width - 70, height - 180),
+            radius=36,
+            fill=(245, 247, 250),
+            outline=(255, 204, 0),
+            width=4,
+        )
+        draw.text((110, 260), title, font=title_font, fill="#0f172a")
+        wrapped = textwrap.fill(body, width=28)
+        draw.text((110, 460), wrapped, font=body_font, fill="#334155", spacing=12)
+        draw.text(
+            (110, height - 260),
+            "Local fallback visual",
+            font=body_font,
+            fill="#b45309",
+        )
+
+        image_path = os.path.join(ROOT_DIR, ".mp", str(uuid4()) + ".png")
+        image.save(image_path, format="PNG")
+        self.images.append(image_path)
+        return image_path
 
     def generate_script_to_speech(self, tts_instance: TTS) -> str:
         """
@@ -423,23 +787,22 @@ class YouTube:
         Returns:
             None
         """
-        videos = self.get_videos()
-        videos.append(video)
-
         cache = get_youtube_cache_path()
+        if not os.path.exists(cache):
+            with open(cache, "w") as file:
+                json.dump({"accounts": []}, file, indent=4)
 
         with open(cache, "r") as file:
-            previous_json = json.loads(file.read())
+            previous_json = json.loads(file.read() or "{}")
 
-            # Find our account
-            accounts = previous_json["accounts"]
-            for account in accounts:
-                if account["id"] == self._account_uuid:
-                    account["videos"].append(video)
+        accounts = previous_json.setdefault("accounts", [])
+        for account in accounts:
+            if account.get("id") == self._account_uuid:
+                account.setdefault("videos", []).append(video)
+                break
 
-            # Commit changes
-            with open(cache, "w") as f:
-                f.write(json.dumps(previous_json))
+        with open(cache, "w") as f:
+            json.dump(previous_json, f, indent=4)
 
     def generate_subtitles(self, audio_path: str) -> str:
         """
@@ -561,17 +924,26 @@ class YouTube:
         threads = get_threads()
         tts_clip = AudioFileClip(self.tts_path)
         max_duration = tts_clip.duration
+        style_pack = self.ensure_style_pack()
+        transition_duration = style_pack["transition_duration"]
+        final_fade_duration = style_pack["final_fade_duration"]
 
-        # Make a generator that returns a TextClip when called with consecutive
+        subtitle_box_width = style_pack["subtitle_box_width"]
+        subtitle_box_height = style_pack["subtitle_box_height"]
+        subtitle_bottom_margin = style_pack["subtitle_bottom_margin"]
+
+        # Render subtitles in a smaller caption box so they can be anchored near
+        # the bottom instead of being vertically centered across the whole frame.
         generator = lambda txt: TextClip(
             txt,
             font=os.path.join(get_fonts_dir(), get_font()),
-            fontsize=100,
-            color="#FFFF00",
-            stroke_color="black",
-            stroke_width=5,
-            size=(1080, 1920),
+            fontsize=style_pack["subtitle_fontsize"],
+            color=style_pack["subtitle_color"],
+            stroke_color=style_pack["subtitle_stroke_color"],
+            stroke_width=style_pack["subtitle_stroke_width"],
+            size=(subtitle_box_width, subtitle_box_height),
             method="caption",
+            align="center",
         )
 
         clips = []
@@ -607,6 +979,10 @@ class YouTube:
         else:
             # ── AI image branch (original behaviour) ───────────────────────
             print(colored("[+] Combining images...", "blue"))
+            if not self.images:
+                raise RuntimeError(
+                    "No images were generated. Check the image provider or fallback path."
+                )
             req_dur = max_duration / len(self.images)
             while tot_dur < max_duration:
                 for image_path in self.images:
@@ -620,35 +996,62 @@ class YouTube:
                         clip = crop(clip, width=round(0.5625 * clip.h), height=clip.h,
                                     x_center=clip.w / 2, y_center=clip.h / 2)
                     clip = clip.resize((1080, 1920))
+                    clip = clip.resize(lambda t: 1 + 0.03 * min(t / req_dur, 1))
                     clips.append(clip)
                     tot_dur += clip.duration
 
-        final_clip = concatenate_videoclips(clips)
-        final_clip = final_clip.set_fps(30)
-        random_song = choose_random_song()
+        timeline_clips = []
+        timeline_start = 0
+        for index, clip in enumerate(clips):
+            if index == 0:
+                clip = clip.set_start(0)
+                timeline_start = clip.duration
+            else:
+                clip = clip.set_start(timeline_start - transition_duration)
+                clip = clip.crossfadein(transition_duration)
+                timeline_start = clip.start + clip.duration
+            timeline_clips.append(clip)
 
+        final_clip = CompositeVideoClip(timeline_clips, size=(1080, 1920))
+        final_clip = final_clip.set_duration(min(timeline_start, max_duration))
+        final_clip = final_clip.set_fps(30)
         subtitles = None
         try:
             subtitles_path = self.generate_subtitles(self.tts_path)
             equalize_subtitles(subtitles_path, 10)
             subtitles = SubtitlesClip(subtitles_path, generator)
-            subtitles.set_pos(("center", "center"))
+            subtitles = subtitles.set_pos(
+                ("center", 1920 - subtitle_box_height - subtitle_bottom_margin)
+            )
         except Exception as e:
             warning(f"Failed to generate subtitles, continuing without subtitles: {e}")
 
-        random_song_clip = AudioFileClip(random_song).set_fps(44100)
-
-        # Turn down volume
-        random_song_clip = random_song_clip.fx(afx.volumex, 0.1)
-        comp_audio = CompositeAudioClip([tts_clip.set_fps(44100), random_song_clip])
+        try:
+            random_song = choose_random_song()
+            random_song_clip = AudioFileClip(random_song).set_fps(44100)
+            random_song_clip = random_song_clip.fx(afx.volumex, style_pack["bgm_volume"])
+            comp_audio = CompositeAudioClip(
+                [tts_clip.set_fps(44100), random_song_clip]
+            )
+        except Exception as e:
+            warning(f"Failed to load background music, using TTS only: {e}")
+            comp_audio = tts_clip.set_fps(44100)
 
         final_clip = final_clip.set_audio(comp_audio)
         final_clip = final_clip.set_duration(tts_clip.duration)
+        final_clip = final_clip.fx(vfx.fadein, final_fade_duration)
+        final_clip = final_clip.fx(vfx.fadeout, final_fade_duration)
 
         if subtitles is not None:
             final_clip = CompositeVideoClip([final_clip, subtitles])
 
-        final_clip.write_videofile(combined_image_path, threads=threads)
+        final_clip.write_videofile(
+            combined_image_path,
+            threads=threads,
+            codec="libx264",
+            audio_codec="aac",
+            ffmpeg_params=["-movflags", "+faststart"],
+        )
 
         success(f'Wrote Video to "{combined_image_path}"')
 
@@ -669,19 +1072,16 @@ class YouTube:
 
         # Generate the Script
         self.generate_script()
+        self.ensure_script_originality(regenerate_callback=self.generate_script)
 
         # Generate the Metadata
         self.generate_metadata()
 
-        # Generate the Image Prompts
-        self.generate_prompts()
-
-        # Generate the Images
-        for prompt in self.image_prompts:
-            self.generate_image(prompt)
-
         # Generate the TTS
         self.generate_script_to_speech(tts_instance)
+
+        # Prepare visuals with layered fallback.
+        self.prepare_visual_assets()
 
         # Combine everything
         path = self.combine()
@@ -708,6 +1108,69 @@ class YouTube:
 
         return channel_id
 
+    def _upload_wait(self, timeout: int = 60) -> WebDriverWait:
+        return WebDriverWait(self.browser, timeout)
+
+    def _safe_click(self, element) -> None:
+        self.browser.execute_script("arguments[0].click();", element)
+
+    def _set_upload_rich_text(self, host_id: str, value: str) -> None:
+        host = self._upload_wait().until(EC.presence_of_element_located((By.ID, host_id)))
+        textbox = host.find_element(By.CSS_SELECTOR, '[id="textbox"][contenteditable="true"]')
+        textbox.click()
+        time.sleep(0.3)
+        textbox.send_keys(Keys.COMMAND, "a")
+        time.sleep(0.1)
+        textbox.send_keys(Keys.BACKSPACE)
+        time.sleep(0.1)
+        textbox.send_keys(value)
+        time.sleep(0.5)
+
+    def _wait_for_upload_editor(self) -> None:
+        self._upload_wait(90).until(
+            EC.presence_of_element_located((By.ID, "title-textarea"))
+        )
+        self._upload_wait(90).until(
+            EC.presence_of_element_located((By.ID, "description-textarea"))
+        )
+
+    def _get_latest_uploaded_video_id(self, expected_title: str | None = None) -> str | None:
+        driver = self.browser
+        wait = self._upload_wait(60)
+        driver.get(
+            f"https://studio.youtube.com/channel/{self.channel_id}/videos/short"
+        )
+        wait.until(EC.presence_of_element_located((By.TAG_NAME, "ytcp-video-row")))
+
+        deadline = time.time() + 120
+        normalized_title = (expected_title or "").strip().lower()
+
+        while time.time() < deadline:
+            videos = driver.find_elements(By.TAG_NAME, "ytcp-video-row")
+            fallback_href = None
+
+            for video in videos:
+                row_text = " ".join((video.text or "").split()).lower()
+                try:
+                    anchor = video.find_element(By.TAG_NAME, "a")
+                    href = anchor.get_attribute("href")
+                except Exception:
+                    href = None
+
+                if href and not fallback_href:
+                    fallback_href = href
+
+                if href and normalized_title and normalized_title in row_text:
+                    return href.split("/")[-2]
+
+            if fallback_href:
+                return fallback_href.split("/")[-2]
+
+            time.sleep(3)
+            driver.refresh()
+
+        return None
+
     def upload_video(self) -> bool:
         """
         Uploads the video to YouTube.
@@ -716,6 +1179,25 @@ class YouTube:
             success (bool): Whether the upload was successful or not.
         """
         try:
+            if (
+                get_enforce_originality_guard()
+                and getattr(self, "originality_report", {}).get("too_similar")
+            ):
+                warning(
+                    "Upload blocked by originality guard because the current script "
+                    f"is too similar to '{self.originality_report.get('matched_title', '')}'."
+                )
+                return False
+
+            if (
+                get_synthetic_disclosure_reminder()
+                and getattr(self, "synthetic_disclosure_required", False)
+            ):
+                warning(
+                    "Synthetic/altered content reminder: review the YouTube upload flow "
+                    f"and disclose these elements if required: {', '.join(self.synthetic_disclosure_reasons)}"
+                )
+
             self.get_channel_id()
 
             driver = self.browser
@@ -726,55 +1208,46 @@ class YouTube:
 
             # Set video file
             FILE_PICKER_TAG = "ytcp-uploads-file-picker"
-            file_picker = driver.find_element(By.TAG_NAME, FILE_PICKER_TAG)
+            file_picker = self._upload_wait(90).until(
+                EC.presence_of_element_located((By.TAG_NAME, FILE_PICKER_TAG))
+            )
             INPUT_TAG = "input"
             file_input = file_picker.find_element(By.TAG_NAME, INPUT_TAG)
             file_input.send_keys(self.video_path)
 
-            # Wait for upload to finish
-            time.sleep(5)
-
-            # Set title
-            textboxes = driver.find_elements(By.ID, YOUTUBE_TEXTBOX_ID)
-
-            title_el = textboxes[0]
-            description_el = textboxes[-1]
+            self._wait_for_upload_editor()
 
             if verbose:
                 info("\t=> Setting title...")
 
-            title_el.click()
-            time.sleep(1)
-            title_el.clear()
-            title_el.send_keys(self.metadata["title"])
+            self._set_upload_rich_text("title-textarea", self.metadata["title"])
 
             if verbose:
                 info("\t=> Setting description...")
 
-            # Set description
-            time.sleep(10)
-            description_el.click()
-            time.sleep(0.5)
-            description_el.clear()
-            description_el.send_keys(self.metadata["description"])
-
-            time.sleep(0.5)
+            self._set_upload_rich_text(
+                "description-textarea", self.metadata["description"]
+            )
 
             # Set `made for kids` option
             if verbose:
                 info("\t=> Setting `made for kids` option...")
 
-            is_for_kids_checkbox = driver.find_element(
-                By.NAME, YOUTUBE_MADE_FOR_KIDS_NAME
+            is_for_kids_checkbox = self._upload_wait().until(
+                EC.presence_of_element_located(
+                    (By.NAME, YOUTUBE_MADE_FOR_KIDS_NAME)
+                )
             )
-            is_not_for_kids_checkbox = driver.find_element(
-                By.NAME, YOUTUBE_NOT_MADE_FOR_KIDS_NAME
+            is_not_for_kids_checkbox = self._upload_wait().until(
+                EC.presence_of_element_located(
+                    (By.NAME, YOUTUBE_NOT_MADE_FOR_KIDS_NAME)
+                )
             )
 
             if not get_is_for_kids():
-                is_not_for_kids_checkbox.click()
+                self._safe_click(is_not_for_kids_checkbox)
             else:
-                is_for_kids_checkbox.click()
+                self._safe_click(is_for_kids_checkbox)
 
             time.sleep(0.5)
 
@@ -782,57 +1255,47 @@ class YouTube:
             if verbose:
                 info("\t=> Clicking next...")
 
-            next_button = driver.find_element(By.ID, YOUTUBE_NEXT_BUTTON_ID)
-            next_button.click()
-
-            # Click next again
-            if verbose:
-                info("\t=> Clicking next again...")
-            next_button = driver.find_element(By.ID, YOUTUBE_NEXT_BUTTON_ID)
-            next_button.click()
-
-            # Wait for 2 seconds
-            time.sleep(2)
-
-            # Click next again
-            if verbose:
-                info("\t=> Clicking next again...")
-            next_button = driver.find_element(By.ID, YOUTUBE_NEXT_BUTTON_ID)
-            next_button.click()
+            for step in range(3):
+                if verbose and step > 0:
+                    info(f"\t=> Clicking next ({step + 1}/3)...")
+                next_button = self._upload_wait().until(
+                    EC.presence_of_element_located((By.ID, YOUTUBE_NEXT_BUTTON_ID))
+                )
+                self._upload_wait().until(
+                    lambda d: next_button.get_attribute("aria-disabled") != "true"
+                )
+                self._safe_click(next_button)
+                time.sleep(1.5)
 
             # Set as unlisted
             if verbose:
                 info("\t=> Setting as unlisted...")
 
-            radio_button = driver.find_elements(By.XPATH, YOUTUBE_RADIO_BUTTON_XPATH)
-            radio_button[2].click()
+            unlisted_button = self._upload_wait().until(
+                EC.presence_of_element_located((By.NAME, "UNLISTED"))
+            )
+            self._safe_click(unlisted_button)
 
             if verbose:
-                info("\t=> Clicking done button...")
+                info("\t=> Saving upload...")
 
             # Click done button
-            done_button = driver.find_element(By.ID, YOUTUBE_DONE_BUTTON_ID)
-            done_button.click()
-
-            # Wait for 2 seconds
-            time.sleep(2)
+            done_button = self._upload_wait().until(
+                EC.presence_of_element_located((By.ID, YOUTUBE_DONE_BUTTON_ID))
+            )
+            self._upload_wait().until(
+                lambda d: done_button.get_attribute("aria-disabled") != "true"
+            )
+            self._safe_click(done_button)
+            time.sleep(5)
 
             # Get latest video
             if verbose:
                 info("\t=> Getting video URL...")
 
-            # Get the latest uploaded video URL
-            driver.get(
-                f"https://studio.youtube.com/channel/{self.channel_id}/videos/short"
-            )
-            time.sleep(2)
-            videos = driver.find_elements(By.TAG_NAME, "ytcp-video-row")
-            first_video = videos[0]
-            anchor_tag = first_video.find_element(By.TAG_NAME, "a")
-            href = anchor_tag.get_attribute("href")
-            if verbose:
-                info(f"\t=> Extracting video ID from URL: {href}")
-            video_id = href.split("/")[-2]
+            video_id = self._get_latest_uploaded_video_id(self.metadata["title"])
+            if not video_id:
+                raise RuntimeError("Unable to locate uploaded video in YouTube Studio.")
 
             # Build URL
             url = build_url(video_id)
@@ -849,6 +1312,12 @@ class YouTube:
                     "description": self.metadata["description"],
                     "url": url,
                     "date": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    "script": getattr(self, "script", ""),
+                    "style_pack": getattr(self, "style_pack_name", ""),
+                    "visual_source": getattr(self, "visual_source", ""),
+                    "synthetic_disclosure_required": getattr(self, "synthetic_disclosure_required", False),
+                    "synthetic_disclosure_reasons": getattr(self, "synthetic_disclosure_reasons", []),
+                    "originality_report": getattr(self, "originality_report", {}),
                 }
             )
 
@@ -856,8 +1325,14 @@ class YouTube:
             driver.quit()
 
             return True
-        except:
-            self.browser.quit()
+        except Exception as exc:
+            error(f"Upload failed: {exc}")
+            if get_verbose():
+                error(traceback.format_exc(), show_emoji=False)
+            try:
+                self.browser.quit()
+            except Exception:
+                pass
             return False
 
     def get_videos(self) -> List[dict]:
@@ -870,17 +1345,19 @@ class YouTube:
         if not os.path.exists(get_youtube_cache_path()):
             # Create the cache file
             with open(get_youtube_cache_path(), "w") as file:
-                json.dump({"videos": []}, file, indent=4)
+                json.dump({"accounts": []}, file, indent=4)
             return []
 
         videos = []
         # Read the cache file
         with open(get_youtube_cache_path(), "r") as file:
-            previous_json = json.loads(file.read())
+            previous_json = json.loads(file.read() or "{}")
+            if "accounts" not in previous_json:
+                return []
             # Find our account
             accounts = previous_json["accounts"]
             for account in accounts:
                 if account["id"] == self._account_uuid:
-                    videos = account["videos"]
+                    videos = account.get("videos", [])
 
         return videos

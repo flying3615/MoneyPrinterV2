@@ -3,7 +3,7 @@ import sys
 
 from status import *
 from cache import get_accounts
-from config import get_verbose
+from config import get_verbose, get_llm_provider, get_openai_model
 from classes.Tts import TTS
 from classes.Twitter import Twitter
 from classes.YouTube import YouTube
@@ -34,8 +34,18 @@ def main():
     if model:
         select_model(model)
     else:
-        error("No Ollama model specified. Pass model name as third argument.")
-        sys.exit(1)
+        provider = get_llm_provider()
+        if provider == "ollama":
+            error("No Ollama model specified. Pass model name as third argument.")
+            sys.exit(1)
+
+        configured_model = get_openai_model()
+        if not configured_model:
+            error(
+                "No OpenAI-compatible model configured. Set openai_model or OPENAI_MODEL."
+            )
+            sys.exit(1)
+        select_model(configured_model)
 
     verbose = get_verbose()
 
